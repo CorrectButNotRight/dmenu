@@ -26,7 +26,7 @@
 #define TEXTW(X)              (drw_fontset_getwidth(drw, (X)) + lrpad)
 
 /* enums */
-enum { SchemeNorm, SchemeSel, SchemeOut, SchemeLast }; /* color schemes */
+enum { SchemeNorm, SchemeSel, SchemeOut, SchemeNormHighlight, SchemeSelHighlight, SchemeLast }; /* color schemes */
 
 struct item {
 	char *text;
@@ -55,8 +55,9 @@ static Clr *scheme[SchemeLast];
 
 #include "config.h"
 
-static int (*fstrncmp)(const char *, const char *, size_t) = strncmp;
-static char *(*fstrstr)(const char *, const char *) = strstr;
+static char * cistrstr(const char *s, const char *sub);
+static int (*fstrncmp)(const char *, const char *, size_t) = strncasecmp;
+static char *(*fstrstr)(const char *, const char *) = cistrstr;
 
 static void
 appenditem(struct item *item, struct item **list, struct item **last)
@@ -122,6 +123,42 @@ cistrstr(const char *s, const char *sub)
 	return NULL;
 }
 
+static void
+drawhighlights(struct item *item, int x, int y, int maxw)
+{
+	char restorechar, tokens[sizeof text], *highlight,  *token;
+	int indentx, highlightlen;
+
+	drw_setscheme(drw, scheme[item == sel ? SchemeSelHighlight : SchemeNormHighlight]);
+	strcpy(tokens, text);
+	for (token = strtok(tokens, " "); token; token = strtok(NULL, " ")) {
+		highlight = fstrstr(item->text, token);
+		while (highlight) {
+			// Move item str end, calc width for highlight indent, & restore
+			highlightlen = highlight - item->text;
+			restorechar = *highlight;
+			item->text[highlightlen] = '\0';
+			indentx = TEXTW(item->text);
+			item->text[highlightlen] = restorechar;
+
+			// Move highlight str end, draw highlight, & restore
+			restorechar = highlight[strlen(token)];
+			highlight[strlen(token)] = '\0';
+			drw_text(
+				drw,
+				x + indentx - (lrpad / 2) - 1,
+				y,
+				MIN(maxw - indentx, TEXTW(highlight) - lrpad),
+				bh, 0, highlight, 0
+			);
+			highlight[strlen(token)] = restorechar;
+
+			if (strlen(highlight) - strlen(token) < strlen(token)) break;
+			highlight = fstrstr(highlight + strlen(token), token);
+		}
+	}
+}
+
 static int
 drawitem(struct item *item, int x, int y, int w)
 {
@@ -132,7 +169,9 @@ drawitem(struct item *item, int x, int y, int w)
 	else
 		drw_setscheme(drw, scheme[SchemeNorm]);
 
-	return drw_text(drw, x, y, w, bh, lrpad / 2, item->text, 0);
+	int r = drw_text(drw, x, y, w, bh, lrpad / 2, item->text, 0);
+	drawhighlights(item, x, y, w);
+	return r;
 }
 
 static void
@@ -147,17 +186,23 @@ drawmenu(void)
 
 	if (prompt && *prompt) {
 		drw_setscheme(drw, scheme[SchemeSel]);
-		x = drw_text(drw, x, 0, promptw, bh, lrpad / 2, prompt, 0);
+		// NOTE don't set x
+		/* x = drw_text(drw, x, 0, promptw, bh, lrpad / 2, prompt, 0); */
+		drw_text(drw, x, 0, promptw, bh, lrpad / 2, prompt, 0);
 	}
 	/* draw input field */
 	w = (lines > 0 || !matches) ? mw - x : inputw;
 	drw_setscheme(drw, scheme[SchemeNorm]);
-	drw_text(drw, x, 0, w, bh, lrpad / 2, text, 0);
+	// NOTE (x + promptw) for x values 
+	/* drw_text(drw, x, 0, w, bh, lrpad / 2, text, 0); */
+	drw_text(drw, x + promptw, 0, w, bh, lrpad / 2, text, 0);
 
 	curpos = TEXTW(text) - TEXTW(&text[cursor]);
 	if ((curpos += lrpad / 2 - 1) < w) {
 		drw_setscheme(drw, scheme[SchemeNorm]);
-		drw_rect(drw, x + curpos, 2 + (bh-fh)/2, 2, fh - 4, 1, 0);
+		// NOTE (x + curpos + promptw) for x values 
+		/* drw_rect(drw, x + curpos, 2 + (bh-fh)/2, 2, fh - 4, 1, 0); */
+		drw_rect(drw, x + curpos + promptw, 2 + (bh-fh)/2, 2, fh - 4, 1, 0);
 	}
 
 	if (lines > 0) {
@@ -656,7 +701,7 @@ setup(void)
 					break;
 
 		if (centered) {
-			mw = MIN(MAX(max_textw() + promptw, 100), info[i].width);
+			mw = MIN(MAX(max_textw() + promptw, min_width), info[i].width);
 			x = info[i].x_org + ((info[i].width  - mw) / 2);
 			y = info[i].y_org + ((info[i].height - mh) / 2);
 		} else {
@@ -674,7 +719,7 @@ setup(void)
 			    parentwin);
 
 		if (centered) {
-			mw = MIN(MAX(max_textw() + promptw, 100), wa.width);
+			mw = MIN(MAX(max_textw() + promptw, min_width), wa.width);
 			x = (wa.width  - mw) / 2;
 			y = (wa.height - mh) / 2;
 		} else {
@@ -743,9 +788,12 @@ main(int argc, char *argv[])
 			fast = 1;
 		else if (!strcmp(argv[i], "-c"))   /* centers dmenu on screen */
 			centered = 1;
-		else if (!strcmp(argv[i], "-i")) { /* case-insensitive item matching */
-			fstrncmp = strncasecmp;
-			fstrstr = cistrstr;
+		/* else if (!strcmp(argv[i], "-i")) { /1* case-insensitive item matching *1/ */
+		/* 	fstrncmp = strncasecmp; */
+		/* 	fstrstr = cistrstr; */
+		else if (!strcmp(argv[i], "-s")) { /* case-sensitive item matching */
+			fstrncmp = strncmp;
+			fstrstr = strstr;
 		} else if (!strcmp(argv[i], "-n")) /* instant select only match */
 			instant = 1;
 		else if (i + 1 == argc)
